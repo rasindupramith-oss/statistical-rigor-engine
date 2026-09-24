@@ -5,6 +5,7 @@ import scipy.stats as stats
 import plotly.graph_objects as go
 import plotly.express as px
 from google import genai
+from itertools import combinations
 
 st.set_page_config(
     page_title="Statistical Rigor Engine",
@@ -15,7 +16,48 @@ st.set_page_config(
 st.title("📊 Statistical Rigor & Hypothesis Engine")
 st.markdown("Automated Goodness-of-Fit and Hypothesis Testing powered by SciPy and Gemini.")
 
-# --- SIDEBAR & SECRETS CONFIGURATION ---
+# --- DEMO DATA GENERATORS ---
+def get_demo_paddy():
+    np.random.seed(42)
+    districts = ["Ampara", "Polonnaruwa", "Kurunegala", "Anuradhapura"]
+    data = []
+    for d in districts:
+        n = np.random.randint(45, 60)
+        base_yield = {"Ampara": 5.2, "Polonnaruwa": 5.6, "Kurunegala": 4.3, "Anuradhapura": 4.8}[d]
+        yields = np.random.gamma(shape=base_yield*4, scale=0.25, size=n)
+        rainfall = np.random.normal(loc=1200 if d in ["Ampara", "Kurunegala"] else 950, scale=120, size=n)
+        for y, r in zip(yields, rainfall):
+            data.append({"District": d, "Yield_MT_per_Ha": round(y, 2), "Rainfall_mm": round(r, 1)})
+    return pd.DataFrame(data)
+
+def get_demo_phones():
+    np.random.seed(101)
+    brands = ["APPLE", "SAMSUNG", "XIAOMI"]
+    data = []
+    for b in brands:
+        n = np.random.randint(40, 60)
+        scale = {"APPLE": 65000, "SAMSUNG": 38000, "XIAOMI": 18000}[b]
+        prices = np.random.lognormal(mean=np.log(scale), sigma=0.45, size=n)
+        ratings = np.clip(np.random.normal(4.4 if b == "APPLE" else 4.1, 0.3, size=n), 3.0, 5.0)
+        for p, r in zip(prices, ratings):
+            data.append({"Brand": b, "Discounted_Price": round(p, 2), "User_Rating": round(r, 1)})
+    return pd.DataFrame(data)
+
+def get_demo_flood():
+    np.random.seed(7)
+    n = 250
+    # Heavy-tailed Gumbel/GEV distribution mimicking extreme river stages
+    stages = stats.gumbel_r.rvs(loc=4.5, scale=1.8, size=n)
+    stages = np.clip(stages, 2.0, 22.0)
+    discharge = (stages ** 2.1) * 12.5 + np.random.normal(0, 15, size=n)
+    station = np.random.choice(["Nagalagam Street", "Hanwella", "Glencorse"], size=n, p=[0.4, 0.35, 0.25])
+    return pd.DataFrame({
+        "Station": station,
+        "Water_Level_Meters": np.round(stages, 2),
+        "Discharge_m3s": np.round(np.maximum(discharge, 10.0), 1)
+    })
+
+# --- SIDEBAR: Configuration & Data Source ---
 secret_key = st.secrets.get("GEMINI_API_KEY", "")
 
 with st.sidebar:
@@ -33,8 +75,23 @@ with st.sidebar:
     )
     
     st.markdown("---")
-    uploaded_file = st.file_uploader("Upload CSV dataset", type=["csv"])
-    st.caption("Upload your data to run distribution fitting or hypothesis tests.")
+    st.header("📂 Data Source")
+    data_mode = st.radio(
+        "Choose Dataset:",
+        ["🌾 Sri Lanka Paddy Harvest", "📱 Smartphone Pricing & Specs", "🌧️ Kelani River Flood & Tail Gauge", "📤 Upload Custom CSV"]
+    )
+    
+    df = None
+    if data_mode == "🌾 Sri Lanka Paddy Harvest":
+        df = get_demo_paddy()
+    elif data_mode == "📱 Smartphone Pricing & Specs":
+        df = get_demo_phones()
+    elif data_mode == "🌧️ Kelani River Flood & Tail Gauge":
+        df = get_demo_flood()
+    else:
+        uploaded_file = st.file_uploader("Upload CSV dataset", type=["csv"])
+        if uploaded_file is not None:
+            df = pd.read_csv(uploaded_file)
 
 # --- GEMINI CLIENT HELPER ---
 def call_gemini(api_key, prompt, preferred_model):
@@ -62,7 +119,7 @@ def call_gemini(api_key, prompt, preferred_model):
             continue
     return None, None, f"Error communicating with Gemini: {last_error}"
 
-# --- CANDIDATE DISTRIBUTIONS (MODULE 1) ---
+# --- CANDIDATE DISTRIBUTIONS ---
 DISTRIBUTIONS = {
     "Normal": stats.norm,
     "Log-Normal": stats.lognorm,
@@ -96,9 +153,8 @@ def fit_distributions(data):
             continue
     return pd.DataFrame(results).sort_values(by="AIC").reset_index(drop=True)
 
-# --- APP TABS ---
-if uploaded_file is not None:
-    df = pd.read_csv(uploaded_file)
+# --- MAIN APP LAYOUT ---
+if df is not None:
     st.write("### Dataset Preview")
     st.dataframe(df.head(4), use_container_width=True)
 
@@ -112,7 +168,7 @@ if uploaded_file is not None:
         numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
         
         if not numeric_cols:
-            st.error("No numeric columns found.")
+            st.error("No numeric columns found in this dataset.")
         else:
             selected_col = st.selectbox("Select variable to model:", numeric_cols, key="dist_col")
             raw_data = df[selected_col].dropna().values
@@ -131,7 +187,7 @@ if uploaded_file is not None:
                 m2.metric("Mean", f"{np.mean(fit_data):.2f}")
                 m3.metric("Std Dev", f"{np.std(fit_data, ddof=1):.2f}")
                 m4.metric("Skewness", f"{stats.skew(fit_data):.3f}")
-                m5.metric("Kurtosis", f"{stats.kurtosis(fit_data):.3f}")
+                m5.metric("Excess Kurtosis", f"{stats.kurtosis(fit_data):.3f}")
 
                 if st.button("🚀 Fit Distributions", type="primary", key="btn_dist"):
                     with st.spinner("Optimizing Maximum Likelihood Estimates..."):
@@ -183,9 +239,8 @@ if uploaded_file is not None:
     # ==========================================
     with tab2:
         st.subheader("🧪 Automated Hypothesis Testing & Assumption Verification")
-        st.markdown("Select a continuous metric and a categorical grouping variable. The advisor checks assumptions and routes to the correct parametric or non-parametric test.")
+        st.markdown("The advisor verifies normality and homoscedasticity, routes to the appropriate test, and performs post-hoc pairwise auditing.")
         
-        all_cols = df.columns.tolist()
         num_candidates = df.select_dtypes(include=[np.number]).columns.tolist()
         cat_candidates = df.select_dtypes(include=['object', 'category', 'int', 'bool']).columns.tolist()
         
@@ -203,16 +258,14 @@ if uploaded_file is not None:
             if len(unique_groups) < 2:
                 st.warning("Selected grouping variable must contain at least 2 distinct categories.")
             else:
-                selected_groups = st.multiselect("Select groups to compare:", unique_groups, default=unique_groups[:2])
+                selected_groups = st.multiselect("Select groups to compare:", unique_groups, default=unique_groups[:3] if len(unique_groups) >= 3 else unique_groups[:2])
                 
                 if len(selected_groups) < 2:
                     st.info("Please select at least 2 groups to perform a comparison test.")
                 else:
-                    # Filter data
                     sub_df = df[df[group_var].isin(selected_groups)][[target_var, group_var]].dropna()
                     group_data = [sub_df[sub_df[group_var] == g][target_var].values for g in selected_groups]
                     
-                    # Descriptive metrics per group
                     st.write("#### Group Summaries")
                     summary_list = []
                     for g in selected_groups:
@@ -231,7 +284,6 @@ if uploaded_file is not None:
                         st.write("---")
                         st.subheader("1. Assumption Diagnostics")
                         
-                        # Check Normality per group (Shapiro-Wilk)
                         normality_passed = True
                         shapiro_results = []
                         for g in selected_groups:
@@ -249,12 +301,11 @@ if uploaded_file is not None:
                         for msg in shapiro_results:
                             st.markdown(f"- {msg}")
                             
-                        # Check Equal Variance (Levene)
                         lev_stat, lev_p = stats.levene(*group_data)
                         equal_var = lev_p > 0.05
                         st.markdown(f"- **Homoscedasticity (Levene's Test)**: p = `{lev_p:.4f}` ({'✅ Equal Variances' if equal_var else '❌ Unequal Variances'})")
                         
-                        # --- ROUTE TO STATISTICAL TEST ---
+                        # Test Routing
                         st.subheader("2. Test Selection & Results")
                         is_two_group = (len(selected_groups) == 2)
                         test_name = ""
@@ -268,7 +319,6 @@ if uploaded_file is not None:
                             if normality_passed and equal_var:
                                 test_name = "Student's Two-Sample t-test (Parametric)"
                                 stat_val, pval = stats.ttest_ind(g1, g2, equal_var=True)
-                                # Cohen's d
                                 s_pooled = np.sqrt(((len(g1)-1)*np.var(g1, ddof=1) + (len(g2)-1)*np.var(g2, ddof=1)) / (len(g1)+len(g2)-2))
                                 effect_val = (np.mean(g1) - np.mean(g2)) / s_pooled if s_pooled > 0 else 0
                                 effect_name = "Cohen's d"
@@ -281,7 +331,6 @@ if uploaded_file is not None:
                             else:
                                 test_name = "Mann-Whitney U Test (Non-Parametric)"
                                 stat_val, pval = stats.mannwhitneyu(g1, g2, alternative='two-sided')
-                                # Rank-biserial correlation
                                 n1, n2 = len(g1), len(g2)
                                 effect_val = 1 - (2 * stat_val) / (n1 * n2)
                                 effect_name = "Rank-Biserial r"
@@ -289,7 +338,6 @@ if uploaded_file is not None:
                             if normality_passed and equal_var:
                                 test_name = "One-way ANOVA (Parametric)"
                                 stat_val, pval = stats.f_oneway(*group_data)
-                                # Eta squared
                                 all_vals = np.concatenate(group_data)
                                 grand_mean = np.mean(all_vals)
                                 ss_between = sum(len(g) * (np.mean(g) - grand_mean)**2 for g in group_data)
@@ -303,7 +351,6 @@ if uploaded_file is not None:
                                 effect_val = (stat_val - len(selected_groups) + 1) / (n_total - len(selected_groups))
                                 effect_name = "Epsilon-Squared (ε²)"
 
-                        # Result Banner
                         sig_text = "Statistically Significant Difference (p < 0.05)" if pval < 0.05 else "No Statistically Significant Difference (p ≥ 0.05)"
                         st.info(f"**Applied Test:** {test_name}\n\n**Verdict:** {sig_text}")
 
@@ -312,7 +359,35 @@ if uploaded_file is not None:
                         r2.metric("p-value", f"{pval:.4e}" if pval < 0.001 else f"{pval:.4f}")
                         r3.metric(f"Effect Size ({effect_name})", f"{effect_val:.3f}")
 
-                        # Visualization: Box / Violin
+                        # --- POST-HOC PAIRWISE TESTING ---
+                        pairwise_summary = []
+                        if len(selected_groups) > 2 and pval < 0.05:
+                            st.write("---")
+                            st.subheader("🔬 Post-Hoc Pairwise Comparisons (Bonferroni Adjusted)")
+                            pairs = list(combinations(selected_groups, 2))
+                            num_comparisons = len(pairs)
+                            
+                            for g_a, g_b in pairs:
+                                v_a = sub_df[sub_df[group_var] == g_a][target_var].values
+                                v_b = sub_df[sub_df[group_var] == g_b][target_var].values
+                                
+                                # Pairwise test matching parametric/non-parametric routing
+                                if normality_passed and equal_var:
+                                    _, raw_p = stats.ttest_ind(v_a, v_b, equal_var=True)
+                                else:
+                                    _, raw_p = stats.mannwhitneyu(v_a, v_b, alternative='two-sided')
+                                    
+                                adj_p = min(1.0, raw_p * num_comparisons)
+                                is_sig = adj_p < 0.05
+                                pairwise_summary.append({
+                                    "Comparison": f"{g_a} vs {g_b}",
+                                    "Raw p-value": f"{raw_p:.4e}",
+                                    "Bonferroni p-value": f"{adj_p:.4f}",
+                                    "Significant (α=0.05)": "✅ Yes" if is_sig else "❌ No"
+                                })
+                            st.dataframe(pd.DataFrame(pairwise_summary), use_container_width=True)
+
+                        # Visualization
                         st.subheader("3. Group Distribution Plot")
                         fig_box = px.box(
                             sub_df, 
@@ -329,23 +404,24 @@ if uploaded_file is not None:
                         st.markdown("---")
                         st.subheader("🧠 Gemini Statistical Verdict & Research Writeup")
                         with st.spinner("Synthesizing APA-format hypothesis report..."):
+                            posthoc_context = f"\n- Post-hoc Pairwise Results: {pairwise_summary}" if pairwise_summary else ""
                             p_hypo = f"""
                             Act as a senior Applied Statistician.
                             Interpret this hypothesis test:
                             - Dependent Variable: {target_var}
                             - Grouping Variable: {group_var}
                             - Compared Groups: {selected_groups}
-                            - Normality Check Passed?: {normality_passed}
-                            - Equal Variance Passed?: {equal_var}
+                            - Normality Passed: {normality_passed}
+                            - Equal Variance Passed: {equal_var}
                             - Chosen Test: {test_name}
                             - Test Statistic: {stat_val:.3f}
                             - p-value: {pval:.4e}
-                            - Effect Size ({effect_name}): {effect_val:.3f}
+                            - Effect Size ({effect_name}): {effect_val:.3f}{posthoc_context}
                             
                             Please write:
                             1. **Selection Rationale**: Why was this specific test mathematically required over the alternative?
-                            2. **Substantive Conclusion**: In practical terms, does the group make a real-world difference?
-                            3. **Formal APA-Style Sentence**: Provide a formal APA 7th edition statistical reporting paragraph that can be pasted directly into a thesis or research paper.
+                            2. **Substantive Conclusion & Pairwise Differences**: What does this mean in reality? (If post-hoc was run, specify which pairs differ).
+                            3. **Formal APA-Style Sentence**: Provide a formal APA 7th edition statistical reporting paragraph ready for publication.
                             """
                             report_h, model_h, err_h = call_gemini(api_key, p_hypo, selected_model)
                             if report_h:
@@ -354,4 +430,4 @@ if uploaded_file is not None:
                             else:
                                 st.error(err_h)
 else:
-    st.info("👋 Upload a CSV file in the sidebar to begin analysis.")
+    st.info("👋 Select a demo dataset or upload a CSV file in the sidebar to begin.")
